@@ -6,9 +6,9 @@ using UniGetUI.Interface.Enums;
 using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
-using UniGetUI.PackageEngine.Interfaces;
 using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
+using UniGetUI.PackageEngine.Managers.Chocolatey;
 using UniGetUI.PackageEngine.Managers.PowerShellManager;
 using UniGetUI.PackageEngine.PackageClasses;
 
@@ -16,10 +16,6 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
 {
     public class PowerShell7 : BaseNuGet
     {
-        public static new string[] FALSE_PACKAGE_NAMES = [""];
-        public static new string[] FALSE_PACKAGE_IDS = [""];
-        public static new string[] FALSE_PACKAGE_VERSIONS = [""];
-
         public PowerShell7()
         {
             Capabilities = new ManagerCapabilities
@@ -41,7 +37,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
             Properties = new ManagerProperties
             {
                 Name = "PowerShell7",
-                DisplayName = "PowerShell 7.x (beta)",
+                DisplayName = "PowerShell 7.x",
                 Description = CoreTools.Translate("PowerShell's package manager. Find libraries and scripts to expand PowerShell capabilities<br>Contains: <b>Modules, Scripts, Cmdlets</b>"),
                 IconId = IconType.PowerShell,
                 ColorIconId = "powershell_color",
@@ -55,10 +51,11 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
                 DefaultSource = new ManagerSource(this, "PSGallery", new Uri("https://www.powershellgallery.com/api/v2")),
             };
 
+            PackageDetailsProvider = new PowerShell7DetailsProvider(this);
             SourceProvider = new PowerShell7SourceProvider(this);
             OperationProvider = new PowerShell7OperationProvider(this);
         }
-        protected override async Task<Package[]> GetAvailableUpdates_UnSafe()
+        protected override IEnumerable<Package> GetAvailableUpdates_UnSafe()
         {
             Process p = new()
             {
@@ -104,13 +101,13 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
 
                 exit
                 """;
-            await p.StandardInput.WriteLineAsync(command);
+            p.StandardInput.WriteLine(command);
             logger.AddToStdIn(command);
             p.StandardInput.Close();
 
             string? line;
             List<Package> Packages = [];
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (line.StartsWith(">>"))
@@ -137,14 +134,14 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
                 Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], elements[2], GetSourceOrDefault(elements[3]), this));
             }
 
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
 
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetInstalledPackages_UnSafe()
+        protected override IEnumerable<Package> GetInstalledPackages_UnSafe()
         {
             Process p = new()
             {
@@ -167,7 +164,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
             string? line;
             List<Package> Packages = [];
             bool DashesPassed = false;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (!DashesPassed)
@@ -194,20 +191,20 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
                 }
             }
 
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
 
-            return Packages.ToArray();
+            return Packages;
         }
-        protected override async Task<ManagerStatus> LoadManager()
+        protected override ManagerStatus LoadManager()
         {
-            var result = await CoreTools.Which("pwsh.exe");
+            var (found, path) = CoreTools.Which("pwsh.exe");
 
             ManagerStatus status = new()
             {
-                ExecutablePath = result.Item2,
-                Found = result.Item1,
+                ExecutablePath = path,
+                Found = found,
             };
 
             if (!status.Found)
@@ -229,7 +226,7 @@ namespace UniGetUI.PackageEngine.Managers.PowerShell7Manager
                 }
             };
             process.Start();
-            status.Version = (await process.StandardOutput.ReadToEndAsync()).Trim();
+            status.Version = process.StandardOutput.ReadToEnd().Trim();
 
             return status;
         }

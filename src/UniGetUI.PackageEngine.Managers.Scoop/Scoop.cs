@@ -4,22 +4,22 @@ using System.Text.RegularExpressions;
 using UniGetUI.Core.Logging;
 using UniGetUI.Core.SettingsEngine;
 using UniGetUI.Core.Tools;
-using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.Interface.Enums;
+using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.PackageClasses;
-using UniGetUI.PackageEngine.ManagerClasses.Classes;
+using UniGetUI.PackageEngine.Structs;
 
 namespace UniGetUI.PackageEngine.Managers.ScoopManager
 {
 
     public class Scoop : PackageManager
     {
-        public static new string[] FALSE_PACKAGE_NAMES = [""];
         public static new string[] FALSE_PACKAGE_IDS = ["No"];
         public static new string[] FALSE_PACKAGE_VERSIONS = ["Matches"];
 
@@ -34,14 +34,14 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                     Path.Join(Environment.SystemDirectory, "windowspowershell\\v1.0\\powershell.exe"),
                     "-ExecutionPolicy Bypass -NoLogo -NoProfile -Command \"& {scoop install main/scoop-search; if($error.count -ne 0){pause}}\"",
                     "scoop install main/scoop-search",
-                    async () => (await CoreTools.Which("scoop-search.exe")).Item1),
+                    async () => (await CoreTools.WhichAsync("scoop-search.exe")).Item1),
                 // GIT is required for scoop updates to work
                 new ManagerDependency(
                     "Git",
                     Path.Join(Environment.SystemDirectory, "windowspowershell\\v1.0\\powershell.exe"),
                     "-ExecutionPolicy Bypass -NoLogo -NoProfile -Command \"& {scoop install main/git; if($error.count -ne 0){pause}}\"",
                     "scoop install main/git",
-                    async () => (await CoreTools.Which("git.exe")).Item1)
+                    async () => (await CoreTools.WhichAsync("git.exe")).Item1)
             ];
 
             Capabilities = new ManagerCapabilities
@@ -89,13 +89,12 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             OperationProvider = new ScoopOperationProvider(this);
         }
 
-        protected override async Task<Package[]> FindPackages_UnSafe(string query)
+        protected override IEnumerable<Package> FindPackages_UnSafe(string query)
         {
             List<Package> Packages = [];
 
-            Tuple<bool, string> which_res = await CoreTools.Which("scoop-search.exe");
-            string path = which_res.Item2;
-            if (!which_res.Item1)
+            var (found, path) = CoreTools.Which("scoop-search.exe");
+            if (!found)
             {
                 Process proc = new()
                 {
@@ -111,9 +110,9 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                 };
                 IProcessTaskLogger aux_logger = TaskLogger.CreateNew(LoggableTaskType.InstallManagerDependency, proc);
                 proc.Start();
-                aux_logger.AddToStdOut(await proc.StandardOutput.ReadToEndAsync());
-                aux_logger.AddToStdErr(await proc.StandardError.ReadToEndAsync());
-                await proc.WaitForExitAsync();
+                aux_logger.AddToStdOut(proc.StandardOutput.ReadToEnd());
+                aux_logger.AddToStdErr(proc.StandardError.ReadToEnd());
+                proc.WaitForExit();
                 aux_logger.Close(proc.ExitCode);
                 path = "scoop-search.exe";
             }
@@ -131,13 +130,14 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                     StandardOutputEncoding = System.Text.Encoding.UTF8
                 }
             };
+            p.StartInfo = CoreTools.UpdateEnvironmentVariables(p.StartInfo);
             IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.FindPackages, p);
 
             p.Start();
 
             string? line;
             IManagerSource source = Properties.DefaultSource;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (line.StartsWith("'"))
@@ -166,16 +166,16 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                     Packages.Add(new Package(Core.Tools.CoreTools.FormatAsName(elements[0]), elements[0], elements[1].Replace("(", "").Replace(")", ""), source, this));
                 }
             }
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetAvailableUpdates_UnSafe()
+        protected override IEnumerable<Package> GetAvailableUpdates_UnSafe()
         {
-            Dictionary<string, Package> InstalledPackages = [];
-            foreach (Package InstalledPackage in await GetInstalledPackages())
+            Dictionary<string, IPackage> InstalledPackages = [];
+            foreach (IPackage InstalledPackage in GetInstalledPackages())
             {
                 if (!InstalledPackages.ContainsKey(InstalledPackage.Id + "." + InstalledPackage.Version))
                 {
@@ -204,7 +204,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 
             string? line;
             bool DashesPassed = false;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (!DashesPassed)
@@ -232,22 +232,24 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                         continue;
                     }
 
-                    if (!InstalledPackages.ContainsKey(elements[0] + "." + elements[1]))
+                    if (InstalledPackages.TryGetValue(elements[0] + "." + elements[1], out IPackage? InstalledPackage))
+                    {
+                        OverridenInstallationOptions options = new(InstalledPackage.OverridenOptions.Scope);
+                        Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], elements[2], InstalledPackage.Source, this, options));
+                    }
+                    else
                     {
                         Logger.Warn("Upgradable scoop package not listed on installed packages - id=" + elements[0]);
-                        continue;
                     }
-
-                    Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], elements[2], InstalledPackages[elements[0] + "." + elements[1]].Source, this, InstalledPackages[elements[0] + "." + elements[1]].Scope));
                 }
             }
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetInstalledPackages_UnSafe()
+        protected override IEnumerable<Package> GetInstalledPackages_UnSafe()
         {
             List<Package> Packages = [];
 
@@ -269,7 +271,7 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
 
             string? line;
             bool DashesPassed = false;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (!DashesPassed)
@@ -297,22 +299,20 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                         continue;
                     }
 
-                    PackageScope scope = PackageScope.User;
-                    if (line.Contains("Global install"))
-                    {
-                        scope = PackageScope.Global;
-                    }
+                    OverridenInstallationOptions options = new(
+                        line.Contains("Global install") ? PackageScope.Global : PackageScope.User
+                    );
 
-                    Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], GetSourceOrDefault(elements[2]), this, scope));
+                    Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], GetSourceOrDefault(elements[2]), this, options));
                 }
             }
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
-            return Packages.ToArray();
+            return Packages;
         }
 
-        public override async Task RefreshPackageIndexes()
+        public override void RefreshPackageIndexes()
         {
             if (new TimeSpan(DateTime.Now.Ticks - LastScoopSourceUpdateTime).TotalMinutes < 10)
             {
@@ -335,13 +335,13 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
             p.StartInfo = StartInfo;
             IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.RefreshIndexes, p);
             p.Start();
-            logger.AddToStdOut(await p.StandardOutput.ReadToEndAsync());
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdOut(p.StandardOutput.ReadToEnd());
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
         }
 
-        protected override async Task<ManagerStatus> LoadManager()
+        protected override ManagerStatus LoadManager()
         {
             ManagerStatus status = new()
             {
@@ -362,8 +362,8 @@ namespace UniGetUI.PackageEngine.Managers.ScoopManager
                 }
             };
             process.Start();
-            status.Version = (await process.StandardOutput.ReadToEndAsync()).Trim();
-            status.Found = (await CoreTools.Which("scoop")).Item1;
+            status.Version = process.StandardOutput.ReadToEnd().Trim();
+            status.Found = CoreTools.Which("scoop").Item1;
 
             Status = status; // Wee need this for the RunCleanup method to get the executable path
             if (status.Found && IsEnabled() && Settings.Get("EnableScoopCleanup"))

@@ -1,4 +1,3 @@
-using CommunityToolkit.WinUI.Notifications;
 using Microsoft.UI.Dispatching;
 using Microsoft.Windows.AppLifecycle;
 using UniGetUI.Core.Data;
@@ -66,12 +65,12 @@ namespace UniGetUI
                 // If this is the main instance, start the app
                 if (!isRedirect)
                 {
-                    Microsoft.UI.Xaml.Application.Start((p) =>
+                    Microsoft.UI.Xaml.Application.Start((_) =>
                     {
                         DispatcherQueueSynchronizationContext context = new(
                             DispatcherQueue.GetForCurrentThread());
                         SynchronizationContext.SetSynchronizationContext(context);
-                        new MainApp();
+                        var app = new MainApp();
                     });
                 }
             }
@@ -91,25 +90,23 @@ namespace UniGetUI
                 // IDK how does this work, I copied it from the MS Docs
                 // example on single-instance apps using unpackaged AppSdk + WinUI3
                 bool isRedirect = false;
-                AppActivationArguments args = AppInstance.GetCurrent().GetActivatedEventArgs();
-                ExtendedActivationKind kind = args.Kind;
 
-                AppInstance keyInstance = AppInstance.FindOrRegisterForKey("MartiCliment.UniGetUI.MainInterface");
+                var keyInstance = AppInstance.FindOrRegisterForKey("MartiCliment.UniGetUI.MainInterface");
 
                 if (keyInstance.IsCurrent)
                 {
-                    keyInstance.Activated += async (s, e) =>
+                    keyInstance.Activated += async (_, e) =>
                     {
-                        MainApp? AppInstance = MainApp.Current as MainApp;
-                        if (AppInstance != null)
+                        if (MainApp.Current is MainApp baseInstance)
                         {
-                            await AppInstance.ShowMainWindowFromRedirectAsync();
+                            await baseInstance.ShowMainWindowFromRedirectAsync(e);
                         }
                     };
                 }
                 else
                 {
                     isRedirect = true;
+                    AppActivationArguments args = AppInstance.GetCurrent().GetActivatedEventArgs();
                     await keyInstance.RedirectActivationToAsync(args);
                 }
                 return isRedirect;
@@ -127,13 +124,13 @@ namespace UniGetUI
         /// </summary>
         private static void UninstallPreps()
         {
-            try
+            /*try
             {
-                ToastNotificationManagerCompat.Uninstall();
+                AppNotificationManager.Default.UnregisterAll();
             }
             catch
             {
-            }
+            }*/
         }
 
         // This method shall be ran as administrator

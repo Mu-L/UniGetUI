@@ -82,5 +82,13 @@ namespace UniGetUI.Interface.Enums
         Warning_Filled = '\uE93E',
         Warning_Round = '\uE93F',
         WinGet = '\uE940',
+        Rust = '\uE941',
+    }
+
+    public class NotificationArguments
+    {
+        public const string Show = "openUniGetUI";
+        public const string ShowOnUpdatesTab = "openUniGetUIOnUpdatesTab";
+        public const string UpdateAllPackages = "updateAll";
     }
 }

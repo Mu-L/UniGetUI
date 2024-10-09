@@ -13,7 +13,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         /// <summary>
         /// Checks if the loader is fetching new packages right now
         /// </summary>
-        public bool IsLoading { get; private set; }
+        public bool IsLoading { get; protected set; }
 
         /// <summary>
         /// The collection of currently available packages
@@ -42,7 +42,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         private int LoadOperationIdentifier;
         protected IEnumerable<IPackageManager> Managers { get; private set; }
 
-        public AbstractPackageLoader(IEnumerable<IPackageManager> managers, string identifier, bool AllowMultiplePackageVersions = false, bool DisableReload = false) 
+        public AbstractPackageLoader(IEnumerable<IPackageManager> managers, string identifier, bool AllowMultiplePackageVersions = false, bool DisableReload = false)
         {
             Managers = managers;
             PackageReference = new Dictionary<long, IPackage>();
@@ -62,12 +62,17 @@ namespace UniGetUI.PackageEngine.PackageLoader
             LoadOperationIdentifier = -1;
             IsLoaded = false;
             IsLoading = false;
-            InvokeFinishedLoadingEvent();
+            if(emitFinishSignal) InvokeFinishedLoadingEvent();
         }
 
         protected void InvokePackagesChangedEvent()
         {
             PackagesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        protected void InvokeStartedLoadingEvent()
+        {
+            StartedLoading?.Invoke(this, EventArgs.Empty);
         }
 
         protected void InvokeFinishedLoadingEvent()
@@ -92,24 +97,24 @@ namespace UniGetUI.PackageEngine.PackageLoader
             IsLoading = true;
             StartedLoading?.Invoke(this, EventArgs.Empty);
 
-            List<Task<IPackage[]>> tasks = new();
+            List<Task<IEnumerable<IPackage>>> tasks = new();
 
             foreach (IPackageManager manager in Managers)
             {
-                if (manager.IsEnabled() && manager.Status.Found)
+                if (manager.IsReady())
                 {
-                    Task<IPackage[]> task = LoadPackagesFromManager(manager);
+                    Task<IEnumerable<IPackage>> task = Task.Run(() => LoadPackagesFromManager(manager));
                     tasks.Add(task);
                 }
             }
 
             while (tasks.Count > 0)
             {
-                foreach (Task<IPackage[]> task in tasks.ToArray())
+                foreach (Task<IEnumerable<IPackage>> task in tasks.ToArray())
                 {
                     if (!task.IsCompleted)
                     {
-                        await Task.Delay(100);
+                        await Task.Delay(100).ConfigureAwait(false);
                     }
 
                     if (task.IsCompleted)
@@ -158,7 +163,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         /// </summary>
         /// <param name="manager">The manager from which to load packages</param>
         /// <returns>A task that will load the packages</returns>
-        protected abstract Task<IPackage[]> LoadPackagesFromManager(IPackageManager manager);
+        protected abstract IEnumerable<IPackage> LoadPackagesFromManager(IPackageManager manager);
 
         /// <summary>
         /// Checks whether the package is valid or must be skipped
@@ -210,7 +215,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         /// <param name="package">The package to add</param>
         public void AddForeign(IPackage? package)
         {
-            if (package == null)
+            if (package is null)
             {
                 return;
             }
@@ -229,7 +234,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         /// </summary>
         public void Remove(IPackage? package)
         {
-            if (package == null)
+            if (package is null)
             {
                 return;
             }
@@ -250,7 +255,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         /// <returns>A Package? object</returns>
         public IPackage? GetEquivalentPackage(IPackage? package)
         {
-            if (package == null)
+            if (package is null)
             {
                 return null;
             }
@@ -292,7 +297,7 @@ namespace UniGetUI.PackageEngine.PackageLoader
         {
             foreach (IPackage package in Packages)
             {
-                if (package.Id == id && (sourceName == null || package.Source.Name == sourceName))
+                if (package.Id == id && (sourceName is null || package.Source.Name == sourceName))
                 {
                     return package;
                 }

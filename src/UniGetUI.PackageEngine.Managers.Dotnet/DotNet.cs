@@ -2,22 +2,22 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using UniGetUI.Core.Tools;
-using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.Interface.Enums;
+using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.Classes;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
-using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
+using UniGetUI.PackageEngine.Managers.Chocolatey;
 using UniGetUI.PackageEngine.Managers.PowerShellManager;
 using UniGetUI.PackageEngine.PackageClasses;
-using UniGetUI.PackageEngine.ManagerClasses.Classes;
+using UniGetUI.PackageEngine.Structs;
 
 namespace UniGetUI.PackageEngine.Managers.DotNetManager
 {
     public class DotNet : BaseNuGet
     {
-        public static new string[] FALSE_PACKAGE_NAMES = [""];
         public static new string[] FALSE_PACKAGE_IDS = [""];
         public static new string[] FALSE_PACKAGE_VERSIONS = [""];
 
@@ -29,7 +29,7 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                     Path.Join(Environment.SystemDirectory, "windowspowershell\\v1.0\\powershell.exe"),
                     "-ExecutionPolicy Bypass -NoLogo -NoProfile -Command \"& {dotnet tool install --global dotnet-tools-outdated --add-source https://api.nuget.org/v3/index.json; if($error.count -ne 0){pause}}\"",
                     "dotnet tool install --global dotnet-tools-outdated --add-source https://api.nuget.org/v3/index.json",
-                    async () => (await CoreTools.Which("dotnet-tools-outdated.exe")).Item1)
+                    async () => (await CoreTools.WhichAsync("dotnet-tools-outdated.exe")).Item1)
             ];
 
             Capabilities = new ManagerCapabilities
@@ -59,14 +59,14 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                 KnownSources = [new ManagerSource(this, "nuget.org", new Uri("https://www.nuget.org/api/v2"))],
             };
 
+            PackageDetailsProvider = new DotNetDetailsProvider(this);
             OperationProvider = new DotNetOperationProvider(this);
         }
 
-        protected override async Task<Package[]> GetAvailableUpdates_UnSafe()
+        protected override IEnumerable<Package> GetAvailableUpdates_UnSafe()
         {
-            Tuple<bool, string> which_res = await CoreTools.Which("dotnet-tools-outdated.exe");
-            string path = which_res.Item2;
-            if (!which_res.Item1)
+            var (found, path) = CoreTools.Which("dotnet-tools-outdated.exe");
+            if (!found)
             {
                 Process proc = new()
                 {
@@ -84,9 +84,9 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                 IProcessTaskLogger aux_logger = TaskLogger.CreateNew(LoggableTaskType.InstallManagerDependency, proc);
                 proc.Start();
 
-                aux_logger.AddToStdOut(await proc.StandardOutput.ReadToEndAsync());
-                aux_logger.AddToStdErr(await proc.StandardError.ReadToEndAsync());
-                await proc.WaitForExitAsync();
+                aux_logger.AddToStdOut(proc.StandardOutput.ReadToEnd());
+                aux_logger.AddToStdErr(proc.StandardError.ReadToEnd());
+                proc.WaitForExit();
                 aux_logger.Close(proc.ExitCode);
 
                 path = "dotnet-tools-outdated.exe";
@@ -106,13 +106,14 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                 }
             };
 
+            p.StartInfo = CoreTools.UpdateEnvironmentVariables(p.StartInfo);
             IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.ListUpdates, p);
             p.Start();
 
             string? line;
             bool DashesPassed = false;
             List<Package> Packages = [];
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
                 if (!DashesPassed)
@@ -140,27 +141,35 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                         continue;
                     }
 
-                    Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], elements[2], DefaultSource, this, PackageScope.Global));
+                    Packages.Add(new Package(
+                        CoreTools.FormatAsName(elements[0]),
+                        elements[0],
+                        elements[1],
+                        elements[2],
+                        DefaultSource,
+                        this,
+                        new(PackageScope.Global)
+                    ));
                 }
             }
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
 
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetInstalledPackages_UnSafe()
+        protected override IEnumerable<Package> GetInstalledPackages_UnSafe()
         {
             List<Package> Packages = [];
-            foreach (PackageScope scope in new PackageScope[] { PackageScope.Local, PackageScope.Global })
+            foreach (var options in new OverridenInstallationOptions[] { new(PackageScope.Local), new(PackageScope.Global) })
             {
                 Process p = new()
                 {
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = Status.ExecutablePath,
-                        Arguments = Properties.ExecutableCallArgs + " list" + (scope == PackageScope.Global ? " --global" : ""),
+                        Arguments = Properties.ExecutableCallArgs + " list" + (options.Scope == PackageScope.Global ? " --global" : ""),
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
                         UseShellExecute = false,
@@ -174,7 +183,7 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
 
                 string? line;
                 bool DashesPassed = false;
-                while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+                while ((line = p.StandardOutput.ReadLine()) is not null)
                 {
                     logger.AddToStdOut(line);
                     if (!DashesPassed)
@@ -202,23 +211,30 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                             continue;
                         }
 
-                        Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], DefaultSource, this, scope));
+                        Packages.Add(new Package(
+                            CoreTools.FormatAsName(elements[0]),
+                            elements[0],
+                            elements[1],
+                            DefaultSource,
+                            this,
+                            options
+                        ));
                     }
                 }
-                logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-                await p.WaitForExitAsync();
+                logger.AddToStdErr(p.StandardError.ReadToEnd());
+                p.WaitForExit();
                 logger.Close(p.ExitCode);
             }
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<ManagerStatus> LoadManager()
+        protected override ManagerStatus LoadManager()
         {
             ManagerStatus status = new();
 
-            Tuple<bool, string> which_res = await CoreTools.Which("dotnet.exe");
-            status.ExecutablePath = which_res.Item2;
-            status.Found = which_res.Item1;
+            var (found, path) = CoreTools.Which("dotnet.exe");
+            status.ExecutablePath = path;
+            status.Found = found;
 
             if (!status.Found)
             {
@@ -239,7 +255,7 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
                 }
             };
             process.Start();
-            await process.WaitForExitAsync();
+            process.WaitForExit();
             if (process.ExitCode != 0)
             {
                 status.Found = false;
@@ -261,7 +277,7 @@ namespace UniGetUI.PackageEngine.Managers.DotNetManager
             };
 
             process.Start();
-            status.Version = (await process.StandardOutput.ReadToEndAsync()).Trim();
+            status.Version = process.StandardOutput.ReadToEnd().Trim();
 
             return status;
         }

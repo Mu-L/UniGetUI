@@ -1,18 +1,23 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 using UniGetUI.Core.Tools;
 using UniGetUI.PackageEngine.Classes.Manager.BaseProviders;
 using UniGetUI.PackageEngine.Enums;
 using UniGetUI.PackageEngine.Interfaces;
-using UniGetUI.PackageEngine.PackageClasses;
 
 namespace UniGetUI.PackageEngine.Managers.WingetManager;
 internal sealed class WinGetOperationProvider : BaseOperationProvider<WinGet>
 {
+    public static string GetIdNamePiece(IPackage package)
+    {
+        if(!package.Id.EndsWith("…"))
+            return $"--id \"{package.Id.TrimEnd('…')}\" --exact";
+
+        if (!package.Name.EndsWith("…"))
+            return $"--name \"{package.Name}\" --exact";
+
+        return $"--id \"{package.Id.TrimEnd('…')}\"";
+    }
+
     public WinGetOperationProvider(WinGet manager) : base(manager) { }
 
     public override IEnumerable<string> GetOperationParameters(IPackage package, IInstallationOptions options, OperationType operation)
@@ -23,12 +28,13 @@ internal sealed class WinGetOperationProvider : BaseOperationProvider<WinGet>
             OperationType.Uninstall => Manager.Properties.UninstallVerb,
             _ => throw new InvalidDataException("Invalid package operation")
         }];
-        parameters.AddRange(["--id", $"\"{package.Id}\"", "--exact"]);
+
+        parameters.AddRange(GetIdNamePiece(package).Split(" "));
         parameters.AddRange(["--source", package.Source.IsVirtualManager ? "winget" : package.Source.Name]);
         parameters.AddRange(["--accept-source-agreements", "--disable-interactivity"]);
 
-        // package.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
-        parameters.AddRange(options.InstallationScope switch {
+        // package.OverridenInstallationOptions.Scope is meaningless in WinGet packages. Default is unspecified, hence the _ => [].
+        parameters.AddRange((package.OverridenOptions.Scope ?? options.InstallationScope) switch {
             PackageScope.User => ["--scope", "user"],
             PackageScope.Machine => ["--scope", "machine"],
             _ => []
@@ -38,14 +44,13 @@ internal sealed class WinGetOperationProvider : BaseOperationProvider<WinGet>
         {
             parameters.AddRange(["--version", $"{package.Version}"]);
         }
-        else if (operation is OperationType.Install && package.Version != "Unknown")
+        else if (operation is OperationType.Install && options.Version != "")
         {
-            parameters.AddRange(["--version", options.Version != "" ? $"{options.Version}" : $"{package.Version}"]);
+            parameters.AddRange(["--version", $"{options.Version}"]);
         }
 
         parameters.Add(options.InteractiveInstallation ? "--interactive" : "--silent");
         parameters.AddRange(options.CustomParameters);
-
 
         if(operation is OperationType.Update)
         {
@@ -82,15 +87,24 @@ internal sealed class WinGetOperationProvider : BaseOperationProvider<WinGet>
         return parameters;
     }
 
-    public override OperationVeredict GetOperationResult(IPackage package, IInstallationOptions options, OperationType operation, IEnumerable<string> processOutput, int returnCode)
+    public override OperationVeredict GetOperationResult(
+        IPackage package,
+        OperationType operation,
+        IEnumerable<string> processOutput,
+        int returnCode)
     {
-        // SEE https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md for reference
+        // See https://github.com/microsoft/winget-cli/blob/master/doc/windows/package-manager/winget/returnCodes.md for reference
         uint uintCode = (uint)returnCode;
 
         if (uintCode == 0x8A150109)
         {
             // If the user is required to restart the system to complete the installation
             return OperationVeredict.RestartRequired;
+        }
+
+        if (uintCode == 0x8A150077 || uintCode == 0x8A15010C || uintCode == 0x8A150005)
+        {
+            return OperationVeredict.Canceled;
         }
 
         if (uintCode == 0x8A150011)
@@ -105,17 +119,17 @@ internal sealed class WinGetOperationProvider : BaseOperationProvider<WinGet>
             return OperationVeredict.Succeeded;
         }
 
-        if(uintCode == 0x8A150056 && options.RunAsAdministrator && !CoreTools.IsAdministrator())
+        if(uintCode == 0x8A150056 && package.OverridenOptions.RunAsAdministrator != false && !CoreTools.IsAdministrator())
         {
             // Installer can't run elevated
-            options.RunAsAdministrator = false;
+            package.OverridenOptions.RunAsAdministrator = false;
             return OperationVeredict.AutoRetry;
         }
 
-        if (uintCode == 0x8A150019 && !options.RunAsAdministrator)
+        if (uintCode == 0x8A150019 && package.OverridenOptions.RunAsAdministrator != true)
         {
             // Installer needs to run elevated
-            options.RunAsAdministrator = true;
+            package.OverridenOptions.RunAsAdministrator = true;
             return OperationVeredict.AutoRetry;
         }
 

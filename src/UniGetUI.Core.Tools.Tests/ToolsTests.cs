@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using UniGetUI.Core.Language;
 
 namespace UniGetUI.Core.Tools.Tests
@@ -33,7 +34,7 @@ namespace UniGetUI.Core.Tools.Tests
         [Fact]
         public async Task TestWhichFunctionForExistingFile()
         {
-            Tuple<bool, string> result = await CoreTools.Which("cmd.exe");
+            Tuple<bool, string> result = await CoreTools.WhichAsync("cmd.exe");
             Assert.True(result.Item1);
             Assert.True(File.Exists(result.Item2));
         }
@@ -41,7 +42,7 @@ namespace UniGetUI.Core.Tools.Tests
         [Fact]
         public async Task TestWhichFunctionForNonExistingFile()
         {
-            Tuple<bool, string> result = await CoreTools.Which("nonexistentfile.exe");
+            Tuple<bool, string> result = await CoreTools.WhichAsync("nonexistentfile.exe");
             Assert.False(result.Item1);
             Assert.Equal("", result.Item2);
         }
@@ -135,6 +136,54 @@ namespace UniGetUI.Core.Tools.Tests
         public void TestSafeQueryString(string query, string expected)
         {
             Assert.Equal(CoreTools.EnsureSafeQueryString(query), expected);
+        }
+
+        [Fact]
+        public void TestEnvVariableCreation()
+        {
+            const string ENV1 = "NONEXISTENTENVVARIABLE";
+            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.Process);
+            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
+
+            ProcessStartInfo oldInfo = CoreTools.UpdateEnvironmentVariables();
+            oldInfo.Environment.TryGetValue(ENV1, out string? result);
+            Assert.Null(result);
+
+            Environment.SetEnvironmentVariable(ENV1, "randomval", EnvironmentVariableTarget.User);
+
+            ProcessStartInfo newInfo1 = CoreTools.UpdateEnvironmentVariables();
+            newInfo1.Environment.TryGetValue(ENV1, out string? result2);
+            Assert.Equal("randomval", result2);
+
+            Environment.SetEnvironmentVariable(ENV1, null, EnvironmentVariableTarget.User);
+            ProcessStartInfo newInfo2 = CoreTools.UpdateEnvironmentVariables();
+            newInfo2.Environment.TryGetValue(ENV1, out string? result3);
+            Assert.Null(result3);
+        }
+
+        [Fact]
+        public void TestEnvVariableReplacement()
+        {
+            const string ENV = "TMP";
+
+            var expected = Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
+
+            ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
+            info.Environment.TryGetValue(ENV, out string? result);
+            Assert.Equal(expected, result);
+        }
+
+        [Fact]
+        public void TestEnvVariableYuxtaposition()
+        {
+            const string ENV = "PATH";
+
+            var oldpath = Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.Machine) + ";" +
+                          Environment.GetEnvironmentVariable(ENV, EnvironmentVariableTarget.User);
+
+            ProcessStartInfo info = CoreTools.UpdateEnvironmentVariables();
+            info.Environment.TryGetValue(ENV, out string? result);
+            Assert.Equal(oldpath, result);
         }
     }
 }

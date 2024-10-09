@@ -1,22 +1,20 @@
 using System.Diagnostics;
+using System.Net.Http.Json;
+using System.Text.Json.Nodes;
 using UniGetUI.Core.Tools;
-using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.Interface.Enums;
+using UniGetUI.PackageEngine.Classes.Manager;
 using UniGetUI.PackageEngine.Classes.Manager.ManagerHelpers;
 using UniGetUI.PackageEngine.Enums;
-using UniGetUI.PackageEngine.Interfaces;
+using UniGetUI.PackageEngine.ManagerClasses.Classes;
 using UniGetUI.PackageEngine.ManagerClasses.Manager;
 using UniGetUI.PackageEngine.PackageClasses;
-using UniGetUI.PackageEngine.ManagerClasses.Classes;
+using UniGetUI.PackageEngine.Structs;
 
 namespace UniGetUI.PackageEngine.Managers.NpmManager
 {
     public class Npm : PackageManager
     {
-        public static new string[] FALSE_PACKAGE_NAMES = [""];
-        public static new string[] FALSE_PACKAGE_IDS = [""];
-        public static new string[] FALSE_PACKAGE_VERSIONS = [""];
-
         public Npm()
         {
             Capabilities = new ManagerCapabilities
@@ -46,15 +44,15 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
             PackageDetailsProvider = new NpmPackageDetailsProvider(this);
             OperationProvider = new NpmOperationProvider(this);
         }
-        
-        protected override async Task<Package[]> FindPackages_UnSafe(string query)
+
+        protected override IEnumerable<Package> FindPackages_UnSafe(string query)
         {
             Process p = new()
             {
                 StartInfo = new ProcessStartInfo
                 {
                     FileName = Status.ExecutablePath,
-                    Arguments = Properties.ExecutableCallArgs + " search \"" + query + "\" --parseable",
+                    Arguments = Properties.ExecutableCallArgs + " search \"" + query + "\" --json",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     RedirectStandardInput = true,
@@ -70,45 +68,43 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
 
             string? line;
             List<Package> Packages = [];
-            bool HeaderPassed = false;
-            while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+            while ((line = p.StandardOutput.ReadLine()) is not null)
             {
                 logger.AddToStdOut(line);
-                if (!HeaderPassed)
+                if (line.StartsWith("{"))
                 {
-                    if (line.Contains("NAME"))
+                    JsonNode? node = JsonNode.Parse(line);
+                    string? id = node?["name"]?.ToString();
+                    string? version = node?["version"]?.ToString();
+                    if (id is not null && version is not null)
                     {
-                        HeaderPassed = true;
+                        Packages.Add(new Package(CoreTools.FormatAsName(id), id, version, DefaultSource, this));
                     }
                     else
                     {
-                        string[] elements = line.Split('\t');
-                        if (elements.Length >= 5)
-                        {
-                            Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[4], DefaultSource, this));
-                        }
+                        logger.AddToStdErr("Line could not be parsed: " + line);
                     }
                 }
             }
 
-            logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-            await p.WaitForExitAsync();
+            logger.AddToStdErr(p.StandardError.ReadToEnd());
+            p.WaitForExit();
             logger.Close(p.ExitCode);
 
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetAvailableUpdates_UnSafe()
+        protected override IEnumerable<Package> GetAvailableUpdates_UnSafe()
         {
             List<Package> Packages = [];
-            foreach (PackageScope scope in new PackageScope[] { PackageScope.Local, PackageScope.Global })
+            foreach (var options in new OverridenInstallationOptions[] { new(PackageScope.Local), new(PackageScope.Global) })
             {
                 Process p = new()
                 {
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = Status.ExecutablePath,
-                        Arguments = Properties.ExecutableCallArgs + " outdated --parseable" + (scope == PackageScope.Global ? " --global" : ""),
+                        Arguments = Properties.ExecutableCallArgs + " outdated --json" + (options.Scope == PackageScope.Global ? " --global" : ""),
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
                         RedirectStandardInput = true,
@@ -122,45 +118,38 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
                 IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.ListUpdates, p);
                 p.Start();
 
-                string? line;
-                while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+                string strContents = p.StandardOutput.ReadToEnd();
+                logger.AddToStdOut(strContents);
+                JsonObject? contents = JsonNode.Parse(strContents) as JsonObject;
+                foreach (var (packageId, packageData) in contents?.ToDictionary() ?? new())
                 {
-                    logger.AddToStdOut(line);
-                    string[] elements = line.Split(':');
-                    if (elements.Length >= 4)
+                    string? version = packageData?["current"]?.ToString();
+                    string? newVersion = packageData?["latest"]?.ToString();
+                    if (version is not null && newVersion is not null)
                     {
-                        if (elements[2][0] == '@')
-                        {
-                            elements[2] = "%" + elements[2][1..];
-                        }
-
-                        if (elements[3][0] == '@')
-                        {
-                            elements[3] = "%" + elements[3][1..];
-                        }
-
-                        Packages.Add(new Package(CoreTools.FormatAsName(elements[2].Split('@')[0]).Replace('%', '@'), elements[2].Split('@')[0].Replace('%', '@'), elements[3].Split('@')[^1].Replace('%', '@'), elements[2].Split('@')[^1].Replace('%', '@'), DefaultSource, this, scope));
+                        Packages.Add(new Package(CoreTools.FormatAsName(packageId), packageId, version, newVersion,
+                            DefaultSource, this, options));
                     }
                 }
 
-                logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-                await p.WaitForExitAsync();
+                logger.AddToStdErr(p.StandardError.ReadToEnd());
+                p.WaitForExit();
                 logger.Close(p.ExitCode);
             }
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<Package[]> GetInstalledPackages_UnSafe()
+        protected override IEnumerable<Package> GetInstalledPackages_UnSafe()
         {
             List<Package> Packages = [];
-            foreach (PackageScope scope in new PackageScope[] { PackageScope.Local, PackageScope.Global })
+            foreach (var options in new OverridenInstallationOptions[] { new(PackageScope.Local), new(PackageScope.Global) })
             {
                 Process p = new()
                 {
                     StartInfo = new ProcessStartInfo
                     {
                         FileName = Status.ExecutablePath,
-                        Arguments = Properties.ExecutableCallArgs + " list" + (scope == PackageScope.Global ? " --global" : ""),
+                        Arguments = Properties.ExecutableCallArgs + " list --json" + (options.Scope == PackageScope.Global ? " --global" : ""),
                         RedirectStandardOutput = true,
                         RedirectStandardError = true,
                         RedirectStandardInput = true,
@@ -174,41 +163,32 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
                 IProcessTaskLogger logger = TaskLogger.CreateNew(LoggableTaskType.ListInstalledPackages, p);
                 p.Start();
 
-                string? line;
-                while ((line = await p.StandardOutput.ReadLineAsync()) != null)
+                string strContents = p.StandardOutput.ReadToEnd();
+                logger.AddToStdOut(strContents);
+                JsonObject? contents = (JsonNode.Parse(strContents) as JsonObject)?["dependencies"] as JsonObject;
+                foreach (var (packageId, packageData) in contents?.ToDictionary() ?? new())
                 {
-                    logger.AddToStdOut(line);
-                    if (line.Contains("--") || line.Contains("├─") || line.Contains("└─"))
+                    string? version = packageData?["version"]?.ToString();
+                    if (version is not null)
                     {
-                        string[] elements = line[4..].Split('@');
-                        if (elements.Length >= 2)
-                        {
-                            if (line.Contains(" @"))
-                            {
-                                elements[0] = "@" + elements[1];
-                                if (elements.Length >= 3)
-                                {
-                                    elements[1] = elements[2];
-                                }
-                            }
-                            Packages.Add(new Package(CoreTools.FormatAsName(elements[0]), elements[0], elements[1], DefaultSource, this, scope));
-                        }
+                        Packages.Add(new Package(CoreTools.FormatAsName(packageId), packageId, version, DefaultSource, this, options));
                     }
                 }
-                logger.AddToStdErr(await p.StandardError.ReadToEndAsync());
-                await p.WaitForExitAsync();
+
+                logger.AddToStdErr(p.StandardError.ReadToEnd());
+                p.WaitForExit();
                 logger.Close(p.ExitCode);
             }
 
-            return Packages.ToArray();
+            return Packages;
         }
 
-        protected override async Task<ManagerStatus> LoadManager()
+        protected override ManagerStatus LoadManager()
         {
             ManagerStatus status = new()
             {
                 ExecutablePath = Path.Join(Environment.SystemDirectory, "windowspowershell\\v1.0\\powershell.exe"),
-                Found = (await CoreTools.Which("npm")).Item1
+                Found = CoreTools.Which("npm").Item1
             };
 
             if (!status.Found)
@@ -232,8 +212,8 @@ namespace UniGetUI.PackageEngine.Managers.NpmManager
                 }
             };
             process.Start();
-            status.Version = (await process.StandardOutput.ReadToEndAsync()).Trim();
-            await process.WaitForExitAsync();
+            status.Version = process.StandardOutput.ReadToEnd().Trim();
+            process.WaitForExit();
 
             return status;
         }

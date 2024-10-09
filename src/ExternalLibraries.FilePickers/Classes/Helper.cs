@@ -1,7 +1,7 @@
-﻿using ExternalLibraries.Pickers.Enums;
+﻿using System.Runtime.InteropServices;
+using ExternalLibraries.Pickers.Enums;
 using ExternalLibraries.Pickers.Interfaces;
 using ExternalLibraries.Pickers.Structures;
-using System.Runtime.InteropServices;
 
 namespace ExternalLibraries.Pickers.Classes;
 
@@ -21,7 +21,7 @@ internal static class Helper
         {
             dialog.SetOptions(fos);
 
-            if (typeFilters != null)
+            if (typeFilters is not null)
             {
                 typeFilters.Insert(0, string.Join("; ", typeFilters));
                 COMDLG_FILTERSPEC[] filterSpecs = typeFilters.Select(f => new COMDLG_FILTERSPEC(f)).ToArray();
@@ -40,7 +40,7 @@ internal static class Helper
         }
         finally
         {
-#pragma warning disable CA1416 
+#pragma warning disable CA1416
             Marshal.ReleaseComObject(dialog);
 #pragma warning restore CA1416
         }
@@ -53,7 +53,7 @@ internal static class Helper
         {
             dialog.SetOptions(fos);
 
-            if (typeFilters != null)
+            if (typeFilters is not null)
             {
                 COMDLG_FILTERSPEC[] filterSpecs = typeFilters.Select(f => new COMDLG_FILTERSPEC(f)).ToArray();
 
@@ -72,11 +72,17 @@ internal static class Helper
 
             dialog.GetResult(out IShellItem item);
             item.GetDisplayName(SIGDN.SIGDN_FILESYSPATH, out string path);
-            return path;
+
+            dialog.GetFileTypeIndex(out uint selection);
+            string fileExtension = typeFilters?[(int)selection - 1] ?? ".txt";
+            if (fileExtension.Length > 0 && fileExtension[0] == '*')
+                fileExtension = fileExtension.TrimStart('*');
+
+            return path.Contains(fileExtension)? path: path + fileExtension;
         }
         finally
         {
-#pragma warning disable CA1416 
+#pragma warning disable CA1416
             Marshal.ReleaseComObject(dialog);
 #pragma warning restore CA1416
         }

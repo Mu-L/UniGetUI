@@ -1,5 +1,7 @@
 ﻿using System.Diagnostics;
 using System.Net;
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using UniGetUI.Core.Logging;
 
 namespace UniGetUI.Core.Data
@@ -25,7 +27,17 @@ namespace UniGetUI.Core.Data
                 };
                 p.Start();
                 string contents = p.StandardOutput.ReadToEnd();
-                return int.Parse(contents.Split(':')[^1].Trim());
+                string purifiedString = "";
+
+                foreach (var c in contents.Split(':')[^1].Trim())
+                {
+                    if (c >= '0' && c <= '9')
+                    {
+                        purifiedString += c;
+                    }
+                }
+
+                return int.Parse(purifiedString);
             }
             catch (Exception e)
             {
@@ -34,8 +46,8 @@ namespace UniGetUI.Core.Data
             }
         }
 
-        public const string VersionName =  "3.1.1"; // Do not modify this line, use file scripts/apply_versions.py
-        public const double VersionNumber =  3.11; // Do not modify this line, use file scripts/apply_versions.py
+        public const string VersionName =  "3.1.2-beta3"; // Do not modify this line, use file scripts/apply_versions.py
+        public const double VersionNumber =  3.1193; // Do not modify this line, use file scripts/apply_versions.py
 
         public const string UserAgentString = $"UniGetUI/{VersionName} (https://marticliment.com/unigetui/; contact@marticliment.com)";
 
@@ -153,25 +165,11 @@ namespace UniGetUI.Core.Data
 
         public static bool IsDaemon;
 
-        public static string ManagerLogs = "";
-
-        private static int __volatile_notification_id_counter = 1235;
-
-        /// <summary>
-        /// A self-incremented value to generate random notification IDs
-        /// </summary>
-        public static int VolatileNotificationIdCounter
-        {
-            get => __volatile_notification_id_counter++;
-        }
-
         /// <summary>
         /// The ID of the notification that is used to inform the user that updates are available
         /// </summary>
-        public static int UpdatesAvailableNotificationId
-        {
-            get => 1234;
-        }
+        public const int UpdatesAvailableNotificationTag = 1234;
+
 
         /// <summary>
         /// A path pointing to the location where the app is installed
@@ -181,14 +179,14 @@ namespace UniGetUI.Core.Data
             get
             {
                 string? dir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
-                if (dir != null)
+                if (dir is not null)
                 {
                     return dir;
                 }
 
                 Logger.Error("System.Reflection.Assembly.GetExecutingAssembly().Location returned an empty path");
 
-                return Path.Join(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "UiGetUI");
+                return Path.Join(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "UniGetUI");
             }
         }
 
@@ -200,7 +198,7 @@ namespace UniGetUI.Core.Data
             get
             {
                 string? filename = Process.GetCurrentProcess().MainModule?.FileName;
-                if (filename != null)
+                if (filename is not null)
                 {
                     return filename.Replace(".dll", ".exe");
                 }
@@ -315,5 +313,11 @@ namespace UniGetUI.Core.Data
                 return new_path;
             }
         }
+
+        public static JsonSerializerOptions SerializingOptions = new()
+        {
+            TypeInfoResolverChain = { new DefaultJsonTypeInfoResolver() },
+            WriteIndented = true,
+        };
     }
 }
