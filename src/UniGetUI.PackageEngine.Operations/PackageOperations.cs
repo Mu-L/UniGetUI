@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using UniGetUI.Core.Classes;
 using UniGetUI.Core.Data;
@@ -76,6 +77,9 @@ namespace UniGetUI.PackageEngine.Operations
         public readonly IPackage Package;
         public readonly InstallOptions Options;
         public readonly OperationType Role;
+        public bool FailedBecauseApplicationRunning { get; private set; }
+        private IReadOnlyList<string> _closeRunningAppProcessNames = [];
+        private readonly List<string> _brokerKillBeforeOperationAdded = [];
 
         protected abstract Task HandleSuccess();
         protected abstract Task HandleFailure();
@@ -187,6 +191,7 @@ namespace UniGetUI.PackageEngine.Operations
 
         protected override void ApplyRetryAction(string retryMode)
         {
+            ClearCloseRunningAppAttempt();
             switch (retryMode)
             {
                 case RetryMode.Retry_AsAdmin:
@@ -197,6 +202,9 @@ namespace UniGetUI.PackageEngine.Operations
                     break;
                 case RetryMode.Retry_SkipIntegrity:
                     Options.SkipHashCheck = true;
+                    break;
+                case RetryMode.Retry_CloseRunningApp:
+                    QueueCloseRunningAppAttempt();
                     break;
                 case RetryMode.Retry:
                     break;
@@ -940,14 +948,150 @@ namespace UniGetUI.PackageEngine.Operations
                 ReturnCode
             );
 
+            FailedBecauseApplicationRunning = false;
             if (veredict is OperationVeredict.Failure)
             {
                 if (Role is OperationType.Update)
                     ExplainNotApplicableUpdate(Output, ReturnCode);
                 ExplainInstallerHashMismatch(ReturnCode);
+                ExplainApplicationCurrentlyRunning(Output, ReturnCode);
             }
 
             return Task.FromResult(veredict);
+        }
+
+        public static bool CanRetryClosingRunningApp(PackageOperation operation)
+        {
+            if (!operation.FailedBecauseApplicationRunning)
+                return false;
+            return GetRunningCloseProcessNames(operation.Package).Count > 0;
+        }
+
+        internal static IReadOnlyList<string> GuessCloseProcessNames(IPackage package)
+        {
+            var names = new List<string>();
+            AddProcessName(names, package.Name);
+            int separator = package.Id.LastIndexOf('.');
+            string idTail = separator >= 0 ? package.Id[(separator + 1)..] : package.Id;
+            AddProcessName(names, idTail);
+            return names;
+        }
+
+        internal static IReadOnlyList<string> GetRunningCloseProcessNames(IPackage package)
+        {
+            var running = new List<string>();
+            foreach (var name in GuessCloseProcessNames(package))
+            {
+                if (HasRunningProcess(name))
+                    running.Add(name);
+            }
+            return running;
+        }
+
+        private static void AddProcessName(List<string> names, string? candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+                return;
+            string name = candidate.Trim();
+            if (name.IndexOfAny([' ', '\\', '/', ':']) >= 0)
+                return;
+            if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                name = name[..^4];
+            if (IsCurrentProcessName(name))
+                return;
+            if (names.Exists(existing => existing.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                return;
+            names.Add(name);
+        }
+
+        private static bool IsCurrentProcessName(string name)
+        {
+            using Process currentProcess = Process.GetCurrentProcess();
+            return name.Equals(currentProcess.ProcessName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasRunningProcess(string name)
+        {
+            var processes = Process.GetProcessesByName(name);
+            try
+            {
+                return processes.Length > 0;
+            }
+            finally
+            {
+                foreach (var process in processes)
+                    process.Dispose();
+            }
+        }
+
+        private void QueueCloseRunningAppAttempt()
+        {
+            var names = GetRunningCloseProcessNames(Package);
+            if (names.Count == 0)
+                return;
+
+            if (IsBrokerEligible(Package))
+            {
+                AddBrokerKillBeforeOperation(names);
+                return;
+            }
+
+            _closeRunningAppProcessNames = names;
+        }
+
+        private void AddBrokerKillBeforeOperation(IReadOnlyList<string> names)
+        {
+            foreach (var processName in names)
+            {
+                if (
+                    Options.KillBeforeOperation.Exists(existing =>
+                        existing.Equals(processName, StringComparison.OrdinalIgnoreCase)
+                    )
+                )
+                    continue;
+
+                Options.KillBeforeOperation.Add(processName);
+                _brokerKillBeforeOperationAdded.Add(processName);
+            }
+        }
+
+        private void ClearCloseRunningAppAttempt()
+        {
+            _closeRunningAppProcessNames = [];
+            foreach (var processName in _brokerKillBeforeOperationAdded)
+                Options.KillBeforeOperation.Remove(processName);
+            _brokerKillBeforeOperationAdded.Clear();
+        }
+
+        protected override IReadOnlyList<InnerOperation> GetAttemptPreOperations()
+        {
+            var ops = new List<InnerOperation>(_closeRunningAppProcessNames.Count);
+            foreach (var processName in _closeRunningAppProcessNames)
+            {
+                ops.Add(
+                    new InnerOperation(
+                        new KillProcessOperation(processName, forceKill: true),
+                        mustSucceed: false
+                    )
+                );
+            }
+            return ops;
+        }
+
+        private void ExplainApplicationCurrentlyRunning(List<string> output, int returnCode)
+        {
+#if WINDOWS
+            if (Package.Manager is not WinGet winget)
+                return;
+            if (!winget.ReportedApplicationCurrentlyRunning(returnCode))
+                return;
+
+            FailedBecauseApplicationRunning = true;
+            Metadata.FailureMessage = CoreTools.Translate(
+                "{package} is currently running. Close it and try again",
+                new Dictionary<string, object?> { { "package", Package.Name } }
+            );
+#endif
         }
 
         private void ExplainNotApplicableUpdate(List<string> output, int returnCode)
