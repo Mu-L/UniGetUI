@@ -1685,5 +1685,13 @@
   "{0} allows stopping running applications.": "{0} allows stopping running applications.",
   "{0} allows uninstalling the previous version.": "{0} allows uninstalling the previous version.",
   "{0} warning(s)": "{0} warning(s)",
-  "Invalid policy files cannot be changed from UniGetUI. An administrator must correct or replace the protected policy file outside this app.": "Invalid policy files cannot be changed from UniGetUI. An administrator must correct or replace the protected policy file outside this app."
+  "Invalid policy files cannot be changed from UniGetUI. An administrator must correct or replace the protected policy file outside this app.": "Invalid policy files cannot be changed from UniGetUI. An administrator must correct or replace the protected policy file outside this app.",
+  "Downloading": "Downloading",
+  "Installing": "Installing",
+  "Updating": "Updating",
+  "Uninstalling": "Uninstalling",
+  "{0}...": "{0}...",
+  "{0} · {1}%": "{0} · {1}%",
+  "{0} · {1}% · {2} / {3}": "{0} · {1}% · {2} / {3}",
+  "{0} · {1}% · {2} / {3} · {4}": "{0} · {1}% · {2} / {3} · {4}"
 }
