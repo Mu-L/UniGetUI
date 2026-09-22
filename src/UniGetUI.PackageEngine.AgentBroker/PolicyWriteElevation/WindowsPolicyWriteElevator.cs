@@ -103,6 +103,8 @@ public sealed class WindowsPipePeerAuthenticator : IPolicyElevationPipePeerAuthe
 /// </summary>
 public sealed record PolicyElevationTimeouts(TimeSpan Connect, TimeSpan Exchange, TimeSpan Exit)
 {
+    public TimeSpan Preflight { get; init; } = PolicyElevationProtocol.PreflightTimeout;
+
     public static PolicyElevationTimeouts Default { get; } = new(
         PolicyElevationProtocol.ConnectTimeout,
         PolicyElevationProtocol.ExchangeTimeout,
@@ -184,7 +186,22 @@ public sealed class WindowsPolicyWriteElevator : IPolicyWriteElevator
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        PolicyElevationRequestMessage preflightRequest = CreateRequestMessage(request, string.Empty);
+        PolicyElevationRequestMessage preflightRequest = CreateRequestMessage(
+            request,
+            new string('0', PolicyElevationProtocol.RequestIdCharacters));
+        try
+        {
+            // Init-only request members can be changed after the constructor has validated its
+            // default operation. Validate the complete wire request before creating a pipe or
+            // launching the privileged helper, so an internal malformed request is deterministic.
+            PolicyElevationFrame.ValidateRequest(preflightRequest);
+        }
+        catch (PolicyElevationFrameException)
+        {
+            return Fail(request, PolicyElevationOutcome.MalformedResponse,
+                "The policy elevation request is malformed.");
+        }
+
         if (!PolicyElevationReplacementDispatcher.IsBrokerRequestWithinLimit(preflightRequest))
         {
             return Fail(
@@ -201,7 +218,7 @@ public sealed class WindowsPolicyWriteElevator : IPolicyWriteElevator
 
         using PolicyElevationPreflightResult preflight =
             await PolicyElevationPreflightRunner
-                .VerifyAsync(_preflight, cancellationToken)
+                .VerifyAsync(_preflight, _timeouts.Preflight, cancellationToken)
                 .ConfigureAwait(false);
         if (!preflight.Succeeded)
         {
@@ -210,10 +227,14 @@ public sealed class WindowsPolicyWriteElevator : IPolicyWriteElevator
                 Logger.Warn($"[PolicyElevation] Preflight failed: {preflight.Detail}");
             }
 
-            PolicyElevationOutcome outcome =
-                preflight.Failure == PolicyElevationPreflightFailureKind.HelperUnavailable
-                    ? PolicyElevationOutcome.HelperUnavailable
-                    : PolicyElevationOutcome.HelperUntrusted;
+            PolicyElevationOutcome outcome = preflight.Failure switch
+            {
+                PolicyElevationPreflightFailureKind.HelperUnavailable =>
+                    PolicyElevationOutcome.HelperUnavailable,
+                PolicyElevationPreflightFailureKind.TimedOut =>
+                    PolicyElevationOutcome.TimedOut,
+                _ => PolicyElevationOutcome.HelperUntrusted,
+            };
             return Fail(
                 request,
                 outcome,

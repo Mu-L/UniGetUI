@@ -5,6 +5,7 @@ using Devolutions.Now.Policy.Api;
 using Devolutions.Now.Policy.Client;
 using UniGetUI.PackageEngine.AgentBroker;
 using UniGetUI.PackageEngine.AgentBroker.PolicyManagement;
+using UniGetUI.PackageEngine.AgentBroker.PolicyWriteElevation;
 
 namespace UniGetUI.PackageEngine.Tests;
 
@@ -83,20 +84,92 @@ public class BrokerPolicyTransportTests
         Assert.Null(exception.BrokerError);
     }
 
+    [Theory]
+    [InlineData("management")]
+    [InlineData("validation")]
+    public async Task PolicyManagementTransport_MapsAnnouncedOversizeToInvalidResponse(
+        string endpoint)
+    {
+        string response =
+            $"HTTP/1.1 200 OK\r\nContent-Length: {BrokerPolicyManagementLimits.MaxResponseBodyBytes + 1}\r\n\r\n";
+
+        string status = await WithPipeAsync(response, async (client, token) =>
+        {
+            var service = new BrokerPolicyManagementService(() => client, () => true);
+            if (endpoint == "management")
+                return (await service.GetManagementAsync(token)).Status.ToString();
+
+            using JsonDocument draft = JsonDocument.Parse("{}");
+            return (await service.ValidateAsync(draft.RootElement, token)).Status.ToString();
+        }, boundedTransport: true);
+
+        Assert.Equal("InvalidResponse", status);
+    }
+
+    [Fact]
+    public async Task PolicyManagementFraming_RejectsActualBodyBeyondDeclaredLength()
+    {
+        byte[] response = Encoding.UTF8.GetBytes(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}x");
+        using var stream = new MemoryStream(response);
+
+        BrokerClientException exception = await Assert.ThrowsAsync<BrokerClientException>(() =>
+            BoundedNamedPipeBrokerTransport.ReadResponseAsync(
+                stream,
+                "/v1/policy/management",
+                BrokerPolicyManagementLimits.MaxResponseBodyBytes,
+                BrokerClientErrorKind.InvalidResponse,
+                CancellationToken.None));
+
+        Assert.Equal(BrokerClientErrorKind.InvalidResponse, exception.Kind);
+    }
+
+    [Fact]
+    public async Task PolicyManagementFraming_RejectsChunkedBodyBeyondDeclaredLength()
+    {
+        using var stream = new ChunkedReadStream(
+            Encoding.UTF8.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"),
+            Encoding.UTF8.GetBytes("x"));
+
+        BrokerClientException exception = await Assert.ThrowsAsync<BrokerClientException>(() =>
+            BoundedNamedPipeBrokerTransport.ReadResponseAsync(
+                stream,
+                "/v1/policy/management",
+                BrokerPolicyManagementLimits.MaxResponseBodyBytes,
+                BrokerClientErrorKind.InvalidResponse,
+                CancellationToken.None));
+
+        Assert.Equal(BrokerClientErrorKind.InvalidResponse, exception.Kind);
+    }
+
+    [Fact]
+    public void PolicyManagementResponseBudget_AllowsDuplicatedReplacementContent()
+    {
+        Assert.True(
+            BrokerPolicyManagementLimits.MaxResponseBodyBytes
+            > BrokerApi.MaxPolicyManagementBodyBytes * 3);
+    }
+
     private static string HttpResponse(int status, string body) =>
         $"HTTP/1.1 {status} Test\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}";
 
     private static async Task<T> WithPipeAsync<T>(
         string? wireResponse,
-        Func<BrokerClient, CancellationToken, Task<T>> action)
+        Func<BrokerClient, CancellationToken, Task<T>> action,
+        bool boundedTransport = false)
     {
         string pipeName = $"unigetui-policy-tests-{Guid.NewGuid():N}";
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         using var server = new NamedPipeServerStream(
             pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        using IBrokerTransport transport = boundedTransport
+            ? new BoundedNamedPipeBrokerTransport(
+                BrokerPolicyManagementLimits.MaxResponseBodyBytes,
+                pipeName)
+            : new NamedPipeBrokerTransport(pipeName);
         using var client = new BrokerClient(new BrokerClientOptions
         {
-            Transport = new NamedPipeBrokerTransport(pipeName),
+            Transport = transport,
             RequestedElevation = Elevation.Standard,
             EffectiveUser = "CONTOSO\\tester",
             ClientExecutablePath = @"C:\Tests\UniGetUI.exe",
@@ -143,5 +216,42 @@ public class BrokerPolicyTransportTests
 
             server.Disconnect();
         }
+    }
+
+    private sealed class ChunkedReadStream(params byte[][] chunks) : Stream
+    {
+        private readonly Queue<byte[]> _chunks = new(chunks);
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_chunks.Count == 0)
+                return ValueTask.FromResult(0);
+
+            byte[] chunk = _chunks.Dequeue();
+            Assert.True(chunk.Length <= buffer.Length);
+            chunk.CopyTo(buffer);
+            return ValueTask.FromResult(chunk.Length);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
     }
 }

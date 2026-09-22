@@ -1,4 +1,5 @@
 using Devolutions.Now.Policy.Api;
+using UniGetUI.PackageEngine.AgentBroker.PolicyWriteElevation;
 
 namespace UniGetUI.PackageEngine.AgentBroker.PolicyManagement;
 
@@ -45,7 +46,7 @@ public enum BrokerPolicyValidationStatus
 }
 
 /// <summary>
-/// Shared constants for the Phase 2 policy management/validation surface.
+/// Shared constants for policy management and validation.
 /// </summary>
 public static class BrokerPolicyManagementLimits
 {
@@ -57,6 +58,14 @@ public static class BrokerPolicyManagementLimits
     /// unbounded GET /v1/policy/management or validate response bodies - the package does not cap those).
     /// </summary>
     public const int MaxRequestBodyBytes = BrokerApi.MaxPolicyManagementBodyBytes;
+
+    /// <summary>
+    /// Maximum UTF-8 response body accepted for any policy-management call. A successful replacement
+    /// can contain three copies of policy content (parsed policy, canonical draft, and management
+    /// snapshot), plus a fourth full contract budget for the response envelope, findings, and metadata.
+    /// </summary>
+    public const int MaxResponseBodyBytes =
+        BoundedNamedPipeBrokerTransport.MaxPolicyManagementResponseBodyBytes;
 
     /// <summary>Maximum length (in Unicode scalar values) kept for the sanitized configured-path diagnostic field.</summary>
     public const int MaxSanitizedPathLength = 4096;
@@ -103,7 +112,7 @@ public sealed record BrokerPolicyDiagnosticsView(
 
 /// <summary>
 /// Result of <see cref="IBrokerPolicyManagementService.GetManagementAsync"/>. <see cref="Snapshot"/> exposes
-/// the package's own contract type directly (mirroring the Phase 1 <c>BrokerPolicyInspectionResult</c>
+/// the package's own contract type directly (matching the existing <c>BrokerPolicyInspectionResult</c>
 /// pattern) so callers retain full fidelity (state, write capability/reason, configured path, store token,
 /// and - when Active - the policy document). <see cref="Diagnostics"/> additionally provides a sanitized,
 /// bounded view of Invalid-state findings suitable for direct UI rendering.

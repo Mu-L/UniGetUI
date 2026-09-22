@@ -99,9 +99,8 @@ public static class PolicyElevationProtocol
     // System.Text.Json's default encoder emits HTML-sensitive safe-ASCII characters such as
     // quotation marks as six-byte \uXXXX escapes.
     private const int MaxSafeAsciiJsonBytesPerCharacter = 6;
-    private const int MaxSafeAsciiStoreTokenValueBytes =
-        QuoteBytes + 1
-        + ((MaxStoreTokenCharacters - 1) * MaxSafeAsciiJsonBytesPerCharacter);
+    private const int MaxCredentialStoreTokenValueBytes =
+        QuoteBytes + MaxStoreTokenCharacters;
     private const int MaxSafeAsciiConflictPolicyIdValueBytes =
         QuoteBytes + 1
         + ((MaxConflictPolicyIdCharacters - 1) * MaxSafeAsciiJsonBytesPerCharacter);
@@ -157,7 +156,7 @@ public static class PolicyElevationProtocol
         + MaxInt32Bytes // brokerStatusCode
         + StaleErrorCodeValueBytes
         + 4 // committedStoreToken is null in a stale response
-        + MaxSafeAsciiStoreTokenValueBytes
+        + MaxCredentialStoreTokenValueBytes
         + ActiveManagementStateBytes
         + MaxSafeAsciiConflictPolicyIdValueBytes;
 
@@ -176,6 +175,9 @@ public static class PolicyElevationProtocol
     public const int MaxResponseFrameBytes = ResponseEnvelopeOverheadBytes;
 
     // ---- Timeouts --------------------------------------------------------------------------
+
+    /// <summary>Maximum time allowed for non-elevated helper location and trust preflight.</summary>
+    public static readonly TimeSpan PreflightTimeout = TimeSpan.FromSeconds(45);
 
     /// <summary>How long the host waits for the elevated helper to connect after consent was granted.</summary>
     public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(45);
