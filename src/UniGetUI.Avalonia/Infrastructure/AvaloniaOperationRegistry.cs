@@ -104,6 +104,8 @@ public static class AvaloniaOperationRegistry
         // concurrently with the writer). MainThread() returns the still-running run task here.
         op.OperationFinished += (_, _) =>
         {
+            _ = RunElevationCleanupAsync();
+
             op.MainThread().ContinueWith(
                 _ => RecordOperationHistory(op, StatusStringFor(op.Status)),
                 TaskScheduler.Default);
@@ -289,6 +291,30 @@ public static class AvaloniaOperationRegistry
         }
     }
 
+    private static async Task RunElevationCleanupAsync()
+    {
+        // Let all remaining operations settle before making decisions
+        await Task.Delay(500);
+
+        long generation = await Dispatcher.UIThread.InvokeAsync(() =>
+            Operations.Any(o => o.Status is OperationStatus.Running or OperationStatus.InQueue)
+                ? -1L
+                : CoreTools.UACCacheGeneration);
+
+        if (generation < 0)
+            return;
+
+        if (Settings.Get(Settings.K.DoCacheAdminRightsForBatches))
+        {
+            if (await CoreTools.ResetUACForCurrentProcess(generation))
+                Logger.Info("Clearing UAC prompt since there are no remaining operations");
+        }
+        else
+        {
+            await CoreTools.InvalidateUACCacheState(generation);
+        }
+    }
+
     private static async Task RunPostOperationChecksAsync()
     {
         // Let all remaining operations settle before making decisions
@@ -296,13 +322,6 @@ public static class AvaloniaOperationRegistry
 
         bool anyStillRunning = Operations.Any(
             o => o.Status is OperationStatus.Running or OperationStatus.InQueue);
-
-        // Clear UAC cache after the last operation in a batch finishes
-        if (!anyStillRunning && Settings.Get(Settings.K.DoCacheAdminRightsForBatches))
-        {
-            Logger.Info("Clearing UAC prompt since there are no remaining operations");
-            await CoreTools.ResetUACForCurrentProcess();
-        }
 
         if (!anyStillRunning)
         {

@@ -870,7 +870,13 @@ namespace UniGetUI.Core.Tools
         /// <summary>
         /// Enables GSudo cache for the current process
         /// </summary>
-        private static bool _isCaching;
+        private static readonly SemaphoreSlim _uacCacheLock = new(1, 1);
+
+        private static bool _uacCacheHeld;
+
+        private static long _uacCacheGeneration;
+
+        public static long UACCacheGeneration => Interlocked.Read(ref _uacCacheGeneration);
 
         public static async Task CacheUACForCurrentProcess()
         {
@@ -882,22 +888,21 @@ namespace UniGetUI.Core.Tools
                 return;
             }
 
-            while (_isCaching)
-                await Task.Delay(100);
+            var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
 
+            // pkexec prompts on every invocation and has no caching protocol.
+            if (elevatorName == "pkexec")
+                return;
+
+            bool isSessionCache = elevatorName != "sudo";
+
+            await _uacCacheLock.WaitAsync();
             try
             {
-                _isCaching = true;
-                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
-
-                var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
-
-                // pkexec prompts on every invocation and has no caching protocol.
-                if (elevatorName == "pkexec")
-                {
-                    _isCaching = false;
+                if (isSessionCache && _uacCacheHeld)
                     return;
-                }
+
+                Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
 
                 // sudo: -v validates/extends the cached timestamp.
                 // Prepend -A only when the SUDO_ASKPASS helper is configured.
@@ -918,6 +923,7 @@ namespace UniGetUI.Core.Tools
                         RedirectStandardInput = true,
                         CreateNoWindow = true,
                         StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
                     },
                 };
 
@@ -926,39 +932,96 @@ namespace UniGetUI.Core.Tools
                 PrepareForegroundForElevation();
 
                 p.Start();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                await Task.WhenAll(stdout, stderr);
                 await p.WaitForExitAsync();
-                _isCaching = false;
+
+                string output = string
+                    .Join(
+                        Environment.NewLine,
+                        new[] { stdout.Result, stderr.Result }.Where(line =>
+                            !string.IsNullOrWhiteSpace(line)
+                        )
+                    )
+                    .Trim();
+
+                if (p.ExitCode == 0)
+                {
+                    _uacCacheHeld = true;
+                    Interlocked.Increment(ref _uacCacheGeneration);
+
+                    Logger.Info(
+                        $"The elevator cached administrator rights for process id {Environment.ProcessId}"
+                    );
+                    if (output.Length > 0)
+                        Logger.Info(output);
+                }
+                else
+                {
+                    Logger.Error(
+                        $"The elevator could not cache administrator rights (exit code {p.ExitCode}). "
+                            + "Every operation that requires elevation will ask for consent separately."
+                    );
+                    if (output.Length > 0)
+                        Logger.Error(output);
+                }
             }
             catch (Exception ex)
             {
+                Logger.Error("Failed to cache administrator rights for the current process");
                 Logger.Error(ex);
-                _isCaching = false;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Forgets that an elevation cache is held, without releasing it. The next operation
+        /// that needs elevation will ask the elevator again; that request is free and silent
+        /// when the session is still alive, and re-establishes it when it is not.
+        /// </summary>
+        public static async Task<bool> InvalidateUACCacheState(long? expectedGeneration = null)
+        {
+            await _uacCacheLock.WaitAsync();
+            try
+            {
+                if (expectedGeneration is long expected
+                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
+                    return false;
+
+                _uacCacheHeld = false;
+                Interlocked.Increment(ref _uacCacheGeneration);
+                return true;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
             }
         }
 
         /// <summary>
         /// Reset UAC cache for the current process
         /// </summary>
-        public static async Task ResetUACForCurrentProcess()
+        public static async Task<bool> ResetUACForCurrentProcess(long? expectedGeneration = null)
         {
             if (Settings.Get(Settings.K.ProhibitElevation))
             {
                 Logger.Error(
                     "Elevation is prohibited, ResetUACForCurrentProcess() call will be ignored"
                 );
-                return;
+                return false;
             }
-
-            Logger.Info(
-                "Resetting administrator rights cache for process id " + Environment.ProcessId
-            );
 
             var elevatorName = Path.GetFileName(CoreData.ElevatorPath);
 
             // pkexec prompts on every invocation and has no caching protocol.
             if (elevatorName == "pkexec")
             {
-                return;
+                return false;
             }
 
             // sudo: -K removes all cached timestamps.
@@ -967,22 +1030,72 @@ namespace UniGetUI.Core.Tools
                 ? "-K"
                 : "cache off --pid " + Environment.ProcessId;
 
-            using Process p = new()
+            await _uacCacheLock.WaitAsync();
+            try
             {
-                StartInfo = new ProcessStartInfo
+                if (expectedGeneration is long expected
+                    && (expected != _uacCacheGeneration || !_uacCacheHeld))
+                    return false;
+
+                _uacCacheHeld = false;
+                Interlocked.Increment(ref _uacCacheGeneration);
+
+                Logger.Info(
+                    "Resetting administrator rights cache for process id " + Environment.ProcessId
+                );
+
+                using Process p = new()
                 {
-                    FileName = CoreData.ElevatorPath,
-                    Arguments = resetArgs,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    RedirectStandardInput = true,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                },
-            };
-            p.Start();
-            await p.WaitForExitAsync();
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = CoreData.ElevatorPath,
+                        Arguments = resetArgs,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        RedirectStandardInput = true,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
+                    },
+                };
+
+                p.Start();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                await Task.WhenAll(stdout, stderr);
+                await p.WaitForExitAsync();
+
+                if (p.ExitCode != 0)
+                {
+                    Logger.Warn(
+                        $"The elevator could not release the administrator rights cache (exit code {p.ExitCode})"
+                    );
+                    string output = string
+                        .Join(
+                            Environment.NewLine,
+                            new[] { stdout.Result, stderr.Result }.Where(line =>
+                                !string.IsNullOrWhiteSpace(line)
+                            )
+                        )
+                        .Trim();
+                    if (output.Length > 0)
+                        Logger.Warn(output);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to release the administrator rights cache");
+                Logger.Error(ex);
+                return true;
+            }
+            finally
+            {
+                _uacCacheLock.Release();
+            }
         }
 
         /// <summary>
